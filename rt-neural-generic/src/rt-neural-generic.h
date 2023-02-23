@@ -33,12 +33,8 @@ typedef enum {
     PLUGIN_PORT_COUNT} ports_t;
 
 // Everything needed to run a model
-struct DynamicModelDetails {
-    /*
-    ModelUnionType type;
-    ModelUnion model;
-    */
-    ModelVariantType model;
+struct DynamicModel {
+    ModelVariantType variant;
     char* path;
     bool input_skip; /* Means the model has been trained with first input element skipped to the output */
 #if 0
@@ -71,7 +67,7 @@ struct WorkerLoadMessage {
 // WorkerMessage compatible, to be used for kWorkerApply or kWorkerFree
 struct WorkerApplyMessage {
     WorkerMessageType type;
-    DynamicModelDetails* model;
+    DynamicModel* model;
 };
 
 /* Define a macro for converting a gain in dB to a coefficient */
@@ -150,8 +146,8 @@ public:
                                        uint32_t                    size,
                                        const void*                 data);
     static LV2_Worker_Status work_response(LV2_Handle instance, uint32_t size, const void* data);
-    static DynamicModelDetails* loadModel(LV2_Log_Logger* logger, const char* path);
-    static void freeModel(DynamicModelDetails* model);
+    static DynamicModel* loadModel(LV2_Log_Logger* logger, const char* path);
+    static void freeModel(DynamicModel* model);
 
     // Features
     LV2_URID_Map*        map;
@@ -187,7 +183,7 @@ private:
     Biquad *depth;
     Biquad *presence;
 
-    DynamicModelDetails* model;
+    DynamicModel* model;
 
     // Pre-allocate arrays for feeding the models
     float inArray1 alignas(RTNEURAL_DEFAULT_ALIGNMENT)[2] = { 0.0, 0.0 };
@@ -196,6 +192,6 @@ private:
     static float rampValue(float start, float end, uint32_t n_samples, uint32_t index);
     static void applyGainRamp(float *out, const float *in, float start, float end, uint32_t n_samples);
     static void applyBiquadFilter(float *out, const float *in, Biquad *filter, uint32_t n_samples);
-    static void applyModel(DynamicModelDetails& model, float *out, uint32_t n_samples);
+    static void applyModel(DynamicModel *model, float *out, uint32_t n_samples);
     static void applyToneControls(float *out, const float *in, LV2_Handle instance, uint32_t n_samples);
 };

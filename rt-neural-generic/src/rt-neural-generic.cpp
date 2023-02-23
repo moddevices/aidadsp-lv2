@@ -144,36 +144,13 @@ void RtNeuralGeneric::applyToneControls(float *out, const float *in, LV2_Handle 
 
 /**********************************************************************************************************************************************************/
 
-template<class ModelT>
-static void applyModel2(ModelT* model, const bool input_skip, float* out, uint32_t n_samples)
-{
-    if constexpr (ModelT::input_size == 1)
-    {
-        if (input_skip)
-        {
-            for (uint32_t i=0; i<n_samples; ++i)
-                out[i] = model->forward (out + i);
-        }
-        else
-        {
-            for (uint32_t i=0; i<n_samples; ++i)
-                out[i] += model->forward (out + i);
-        }
-    }
-    else
-    {
-        // TODO
-    }
-}
-
 /**
  * This function carries model calculations for snapshot models
  */
-void RtNeuralGeneric::applyModel(DynamicModelDetails& details, float* out, uint32_t n_samples)
+void RtNeuralGeneric::applyModel(DynamicModel* model, float* out, uint32_t n_samples)
 {
-    const bool input_skip = details.input_skip;
+    const bool input_skip = model->input_skip;
 
-#if 1
     std::visit (
         [&input_skip, &out, &n_samples] (auto&& custom_model)
         {
@@ -196,32 +173,8 @@ void RtNeuralGeneric::applyModel(DynamicModelDetails& details, float* out, uint3
                 // TODO
             }
         },
-        details.model
+        model->variant
     );
-#else
-    switch (details.type)
-    {
-    case kNullModel: return;
-    // from RTNeural template gen
-    case kModelType_GRU_8_1:   return applyModel2(details.model.gru_8_1, input_skip, out, n_samples);
-    case kModelType_LSTM_32_2: return applyModel2(details.model.lstm_32_2, input_skip, out, n_samples);
-    case kModelType_LSTM_16_2: return applyModel2(details.model.lstm_16_2, input_skip, out, n_samples);
-    case kModelType_LSTM_8_2:  return applyModel2(details.model.lstm_8_2, input_skip, out, n_samples);
-    case kModelType_GRU_16_1:  return applyModel2(details.model.gru_16_1, input_skip, out, n_samples);
-    case kModelType_GRU_32_1:  return applyModel2(details.model.gru_32_1, input_skip, out, n_samples);
-    case kModelType_GRU_16_2:  return applyModel2(details.model.gru_16_2, input_skip, out, n_samples);
-    case kModelType_GRU_32_2:  return applyModel2(details.model.gru_32_2, input_skip, out, n_samples);
-    case kModelType_LSTM_8_1:  return applyModel2(details.model.lstm_8_1, input_skip, out, n_samples);
-    case kModelType_LSTM_32_1: return applyModel2(details.model.lstm_32_1, input_skip, out, n_samples);
-    case kModelType_LSTM_16_1: return applyModel2(details.model.lstm_16_1, input_skip, out, n_samples);
-    case kModelType_GRU_8_2:   return applyModel2(details.model.gru_8_2, input_skip, out, n_samples);
-    // from aidadsp
-    case kModelType_GRU_12_1:  return applyModel2(details.model.gru_12_1, input_skip, out, n_samples);
-    case kModelType_LSTM_12_1: return applyModel2(details.model.lstm_12_1, input_skip, out, n_samples);
-    case kModelType_LSTM_20_1: return applyModel2(details.model.lstm_20_1, input_skip, out, n_samples);
-    case kModelType_LSTM_40_1: return applyModel2(details.model.lstm_40_1, input_skip, out, n_samples);
-    }
-#endif
 }
 
 /**********************************************************************************************************************************************************/
@@ -294,7 +247,22 @@ LV2_Handle RtNeuralGeneric::instantiate(const LV2_Descriptor* descriptor, double
 
 void RtNeuralGeneric::activate(LV2_Handle instance)
 {
+    RtNeuralGeneric *self = (RtNeuralGeneric*) instance;
+
+    if (self->model == nullptr)
+        return;
+
     // TODO: include the activate function code here
+    std::visit (
+        [] (auto&& custom_model)
+        {
+            using ModelType = std::decay_t<decltype (custom_model)>;
+            if constexpr (! std::is_same_v<ModelType, NullModel>)
+            {
+                custom_model.reset();
+            }
+        },
+        self->model->variant);
 }
 
 /**********************************************************************************************************************************************************/
@@ -468,7 +436,7 @@ void RtNeuralGeneric::run(LV2_Handle instance, uint32_t n_samples)
         applyToneControls(self->out_1, self->out_1, instance, n_samples); // Equalizer section
     }
     if (net_bypass == 0.0f && self->model != nullptr) {
-        applyModel(*self->model, self->out_1, n_samples);
+        applyModel(self->model, self->out_1, n_samples);
     }
     applyBiquadFilter(self->out_1, self->out_1, self->dc_blocker, n_samples); // Dc blocker filter (highpass)
     if(eq_position == 0.0f && eq_bypass == 0.0f) {
@@ -484,8 +452,17 @@ void RtNeuralGeneric::run(LV2_Handle instance, uint32_t n_samples)
 
 void RtNeuralGeneric::cleanup(LV2_Handle instance)
 {
-    freeModel (((RtNeuralGeneric*) instance)->model);
-    delete ((RtNeuralGeneric*) instance);
+    RtNeuralGeneric *self = (RtNeuralGeneric*) instance;
+
+    freeModel (self->model);
+    delete self->dc_blocker;
+    delete self->in_lpf;
+    delete self->bass;
+    delete self->mid;
+    delete self->treble;
+    delete self->depth;
+    delete self->presence;
+    delete self;
 }
 
 /**********************************************************************************************************************************************************/
@@ -594,7 +571,7 @@ LV2_Worker_Status RtNeuralGeneric::work(LV2_Handle instance,
     switch (msg->type)
     {
     case kWorkerLoad:
-        if (DynamicModelDetails* newmodel = RtNeuralGeneric::loadModel(&self->logger, ((const WorkerLoadMessage*)data)->path))
+        if (DynamicModel* newmodel = RtNeuralGeneric::loadModel(&self->logger, ((const WorkerLoadMessage*)data)->path))
         {
             WorkerApplyMessage reply = { kWorkerApply, newmodel };
             respond (handle, sizeof(reply), &reply);
@@ -658,7 +635,7 @@ LV2_Worker_Status RtNeuralGeneric::work_response(LV2_Handle instance, uint32_t s
 /**
  * This function loads a pre-trained neural model from a json file
 */
-DynamicModelDetails* RtNeuralGeneric::loadModel(LV2_Log_Logger* logger, const char* path)
+DynamicModel* RtNeuralGeneric::loadModel(LV2_Log_Logger* logger, const char* path)
 {
     int input_skip;
     nlohmann::json model_json;
@@ -688,11 +665,10 @@ DynamicModelDetails* RtNeuralGeneric::loadModel(LV2_Log_Logger* logger, const ch
         return nullptr;
     }
 
-    std::unique_ptr<DynamicModelDetails> details = std::make_unique<DynamicModelDetails>();
+    std::unique_ptr<DynamicModel> model = std::make_unique<DynamicModel>();
 
     try {
-#if 1
-        if (! custom_model_creator (model_json, details->model))
+        if (! custom_model_creator (model_json, model->variant))
             throw std::runtime_error ("Unable to identify a known model architecture!");
 
         std::visit (
@@ -705,36 +681,7 @@ DynamicModelDetails* RtNeuralGeneric::loadModel(LV2_Log_Logger* logger, const ch
                     custom_model.reset();
                 }
             },
-            details->model);
-#else
-            details->model = custom_model_creator (model_json, details->type);
-
-            if (details->model.ptr == nullptr)
-                throw std::runtime_error ("Unable to identify a known model architecture!");
-
-            switch (details->type)
-            {
-            case kNullModel: break;
-            // from RTNeural template gen
-            case kModelType_GRU_8_1:   details->model.gru_8_1->parseJson (model_json, true); details->model.gru_8_1->reset(); break;
-            case kModelType_LSTM_32_2: details->model.lstm_32_2->parseJson (model_json, true); details->model.lstm_32_2->reset(); break;
-            case kModelType_LSTM_16_2: details->model.lstm_16_2->parseJson (model_json, true); details->model.lstm_16_2->reset(); break;
-            case kModelType_LSTM_8_2:  details->model.lstm_8_2->parseJson (model_json, true); details->model.lstm_8_2->reset(); break;
-            case kModelType_GRU_16_1:  details->model.gru_16_1->parseJson (model_json, true); details->model.gru_16_1->reset(); break;
-            case kModelType_GRU_32_1:  details->model.gru_32_1->parseJson (model_json, true); details->model.gru_32_1->reset(); break;
-            case kModelType_GRU_16_2:  details->model.gru_16_2->parseJson (model_json, true); details->model.gru_16_2->reset(); break;
-            case kModelType_GRU_32_2:  details->model.gru_32_2->parseJson (model_json, true); details->model.gru_32_2->reset(); break;
-            case kModelType_LSTM_8_1:  details->model.lstm_8_1->parseJson (model_json, true); details->model.lstm_8_1->reset(); break;
-            case kModelType_LSTM_32_1: details->model.lstm_32_1->parseJson (model_json, true); details->model.lstm_32_1->reset(); break;
-            case kModelType_LSTM_16_1: details->model.lstm_16_1->parseJson (model_json, true); details->model.lstm_16_1->reset(); break;
-            case kModelType_GRU_8_2:   details->model.gru_8_2->parseJson (model_json, true); details->model.gru_8_2->reset(); break;
-            // from aidadsp
-            case kModelType_GRU_12_1:  details->model.gru_12_1->parseJson (model_json, true); details->model.gru_12_1->reset(); break;
-            case kModelType_LSTM_12_1: details->model.lstm_12_1->parseJson (model_json, true); details->model.lstm_12_1->reset(); break;
-            case kModelType_LSTM_20_1: details->model.lstm_20_1->parseJson (model_json, true); details->model.lstm_20_1->reset(); break;
-            case kModelType_LSTM_40_1: details->model.lstm_40_1->parseJson (model_json, true); details->model.lstm_40_1->reset(); break;
-            }
-#endif
+            model->variant);
     }
     catch (const std::exception& e) {
         lv2_log_error(logger, "Error loading model: %s\n", e.what());
@@ -742,14 +689,14 @@ DynamicModelDetails* RtNeuralGeneric::loadModel(LV2_Log_Logger* logger, const ch
     }
 
     // save extra info
-    details->path = strdup(path);
-    details->input_skip = input_skip != 0;
+    model->path = strdup(path);
+    model->input_skip = input_skip != 0;
 
     // Pre-buffer to avoid "clicks" during initialization
     float out[2048] = {};
-    applyModel(*details, out, 2048);
+    applyModel(model.get(), out, 2048);
 
-    return details.release();
+    return model.release();
 }
 
 /**********************************************************************************************************************************************************/
@@ -757,10 +704,10 @@ DynamicModelDetails* RtNeuralGeneric::loadModel(LV2_Log_Logger* logger, const ch
 /**
  * This function deletes a model instance and its related details
 */
-void RtNeuralGeneric::freeModel(DynamicModelDetails* details)
+void RtNeuralGeneric::freeModel(DynamicModel* model)
 {
-    if (details == nullptr)
+    if (model == nullptr)
         return;
-    free (details->path);
-    delete details->model;
+    free (model->path);
+    delete model;
 }
